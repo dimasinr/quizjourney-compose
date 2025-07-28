@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  frontend:
+    image: ghcr.io/dimasinr/fe-quizjourney:v1
+    container_name: frontend
+    restart: always
+    expose:
+      - "80"
+
+  backend:
+    image: ghcr.io/dimasinr/be-quizjourney:v1
+    container_name: backend
+    restart: always
+    expose:
+      - "5000"
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+      - backend
+
