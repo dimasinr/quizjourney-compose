@@ -1,0 +1,296 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  FRONTEND_IMAGE: ghcr.io/dimasinr/fe-quizjourney
+  BACKEND_IMAGE: ghcr.io/dimasinr/be-quizjourney
+
+jobs:
+  # Build and Test
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Test Frontend
+        run: |
+          if [ -f "frontend/package.json" ]; then
+            cd frontend
+            npm ci
+            npm test --if-present
+            npm run lint --if-present
+          fi
+
+      - name: Test Backend
+        run: |
+          if [ -f "backend/*.csproj" ]; then
+            find backend -name "*.csproj" -exec dotnet restore {} \;
+            find backend -name "*.csproj" -exec dotnet test {} --no-restore \;
+          fi
+
+  # Build and Push Docker Images
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:latest
+            ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:latest
+            ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Deploy to Staging
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to staging server
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USERNAME }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          source: "docker-compose.yaml,nginx/default.conf"
+          target: "/opt/quizjourney-staging"
+          strip_components: 0
+
+      - name: Deploy to staging server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USERNAME }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            echo "🚀 Deploying to STAGING..."
+            
+            cd /opt/quizjourney-staging
+            
+            # Stop existing containers
+            if [ -f "docker-compose.yaml" ]; then
+              echo "🛑 Stopping existing containers..."
+              docker-compose down --remove-orphans
+            fi
+            
+            # Clean up old images
+            echo "🧹 Cleaning up Docker resources..."
+            docker system prune -f
+            
+            # Pull latest images
+            echo "📥 Pulling latest images..."
+            docker pull ${{ env.FRONTEND_IMAGE }}:latest
+            docker pull ${{ env.BACKEND_IMAGE }}:latest
+            
+            # Start services
+            echo "🚀 Starting services..."
+            docker-compose up -d
+            
+            # Wait for services
+            echo "⏳ Waiting for services to start..."
+            sleep 30
+            
+            # Check status
+            echo "📊 Service Status:"
+            docker-compose ps
+            
+            echo "📋 Recent Logs:"
+            docker-compose logs --tail=10
+
+  # Deploy to Production
+  deploy-production:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to production server
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          source: "docker-compose.yaml,nginx/default.conf"
+          target: "/opt/quizjourney"
+          strip_components: 0
+
+      - name: Deploy to production server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            echo "🚀 Deploying to PRODUCTION..."
+            
+            cd /opt/quizjourney
+            
+            # Stop existing containers
+            if [ -f "docker-compose.yaml" ]; then
+              echo "🛑 Stopping existing containers..."
+              docker-compose down --remove-orphans
+            fi
+            
+            # Clean up old images
+            echo "🧹 Cleaning up Docker resources..."
+            docker system prune -f
+            
+            # Pull latest images
+            echo "📥 Pulling latest images..."
+            docker pull ${{ env.FRONTEND_IMAGE }}:latest
+            docker pull ${{ env.BACKEND_IMAGE }}:latest
+            
+            # Start services
+            echo "🚀 Starting services..."
+            docker-compose up -d
+            
+            # Wait for services
+            echo "⏳ Waiting for services to start..."
+            sleep 30
+            
+            # Check status
+            echo "📊 Service Status:"
+            docker-compose ps
+            
+            echo "📋 Recent Logs:"
+            docker-compose logs --tail=10
+
+  # Health Check
+  health-check:
+    needs: [deploy-staging, deploy-production]
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'push'
+    steps:
+      - name: Health check staging
+        if: github.ref == 'refs/heads/develop'
+        run: |
+          echo "🏥 Checking staging health..."
+          sleep 60
+          
+          ssh -o StrictHostKeyChecking=no -i ${{ secrets.STAGING_SSH_KEY }} ${{ secrets.STAGING_USERNAME }}@${{ secrets.STAGING_HOST }} << 'EOF'
+            cd /opt/quizjourney-staging
+            echo "📊 Staging Container Status:"
+            docker-compose ps
+            
+            echo "🔍 Staging Health Checks:"
+            if docker-compose ps | grep -q "Up"; then
+              echo "✅ Staging services are running"
+            else
+              echo "❌ Some staging services are not running"
+              docker-compose logs --tail=20
+            fi
+          EOF
+
+      - name: Health check production
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🏥 Checking production health..."
+          sleep 60
+          
+          ssh -o StrictHostKeyChecking=no -i ${{ secrets.SSH_KEY }} ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
+            cd /opt/quizjourney
+            echo "📊 Production Container Status:"
+            docker-compose ps
+            
+            echo "🔍 Production Health Checks:"
+            if docker-compose ps | grep -q "Up"; then
+              echo "✅ Production services are running"
+            else
+              echo "❌ Some production services are not running"
+              docker-compose logs --tail=20
+            fi
+          EOF
+
+  # Security Scan
+  security-scan:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.FRONTEND_IMAGE }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Notification
+  notify:
+    needs: [deploy-staging, deploy-production, health-check]
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'push'
+    steps:
+      - name: Notify deployment status
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        if: always() 

@@ -7,24 +7,50 @@ services:
     restart: always
     labels:
       - traefik.enable=true
+      # Semua request tanpa prefix /api dan /roomHub jatuh ke frontend
       - traefik.http.routers.frontend.rule=Host(`rapid.storyjourney.net`)
       - traefik.http.routers.frontend.entrypoints=websecure
       - traefik.http.routers.frontend.tls.certresolver=letsencrypt
+      - traefik.http.routers.frontend.priority=1
       - traefik.http.services.frontend.loadbalancer.server.port=80
+    # (opsional) healthcheck sederhana
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
 
   backend:
     image: ghcr.io/dimasinr/be-quizjourney:v1
     container_name: backend
     restart: always
+    environment:
+      # pastikan apps listen ke 0.0.0.0:5000 (contoh untuk .NET)
+      # ASPNETCORE_URLS: http://0.0.0.0:5000
     labels:
       - traefik.enable=true
-      - traefik.http.routers.backend.rule=Host(`rapid.storyjourney.net`) && PathPrefix(`/api`, `/roomHub`)
-      - traefik.http.routers.backend.entrypoints=websecure
-      - traefik.http.routers.backend.tls.certresolver=letsencrypt
+      # Layanan backend port internal 5000
       - traefik.http.services.backend.loadbalancer.server.port=5000
-      - traefik.http.routers.backend.service=backend
-      # Optional websocket support for SignalR
-      - traefik.http.middlewares.websocket.headers.customrequestheaders.Connection=Upgrade
-      - traefik.http.middlewares.websocket.headers.customrequestheaders.Upgrade=websocket
-      - traefik.http.routers.backend.middlewares=websocket
 
+      # Router API
+      - traefik.http.routers.backend_api.rule=Host(`rapid.storyjourney.net`) && PathPrefix(`/api`)
+      - traefik.http.routers.backend_api.entrypoints=websecure
+      - traefik.http.routers.backend_api.tls.certresolver=letsencrypt
+      - traefik.http.routers.backend_api.service=backend
+      - traefik.http.routers.backend_api.priority=100
+
+      # Router SignalR (WebSocket)
+      - traefik.http.routers.backend_hub.rule=Host(`rapid.storyjourney.net`) && (Path(`/roomHub`) || PathPrefix(`/roomHub/`))
+      - traefik.http.routers.backend_hub.entrypoints=websecure
+      - traefik.http.routers.backend_hub.tls.certresolver=letsencrypt
+      - traefik.http.routers.backend_hub.service=backend
+      - traefik.http.routers.backend_hub.priority=100
+
+    # (opsional) healthcheck ke endpoint backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
