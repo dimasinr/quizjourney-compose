@@ -7,15 +7,14 @@ services:
     restart: always
     labels:
       - traefik.enable=true
-      # Semua request tanpa prefix /api dan /roomHub jatuh ke frontend
       - traefik.http.routers.frontend.rule=Host(`rapid.storyjourney.net`)
       - traefik.http.routers.frontend.entrypoints=websecure
       - traefik.http.routers.frontend.tls.certresolver=letsencrypt
       - traefik.http.routers.frontend.priority=1
       - traefik.http.services.frontend.loadbalancer.server.port=80
-    # (opsional) healthcheck sederhana
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      # pilih salah satu: curl biasanya sudah ada di image Nginx/dotnet
+      test: ["CMD-SHELL", "curl -fsS http://localhost/ || exit 1"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -26,11 +25,11 @@ services:
     container_name: backend
     restart: always
     environment:
-      # pastikan apps listen ke 0.0.0.0:5000 (contoh untuk .NET)
-      # ASPNETCORE_URLS: http://0.0.0.0:5000
+      ASPNETCORE_URLS: http://0.0.0.0:5000
+      ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
     labels:
       - traefik.enable=true
-      # Layanan backend port internal 5000
+      # Service backend (internal 5000)
       - traefik.http.services.backend.loadbalancer.server.port=5000
 
       # Router API
@@ -47,10 +46,9 @@ services:
       - traefik.http.routers.backend_hub.service=backend
       - traefik.http.routers.backend_hub.priority=100
 
-    # (opsional) healthcheck ke endpoint backend
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/health || exit 1"]
       interval: 30s
       timeout: 3s
       retries: 3
-      start_period: 20s
+      start_period: 30s
